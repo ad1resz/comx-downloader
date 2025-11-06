@@ -20,6 +20,7 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from webdriver_manager.firefox import GeckoDriverManager
 from urllib.parse import urljoin, urlparse, quote
 
+# --- Цвета и Стили ---
 CYAN = '\033[96m'
 YELLOW = '\033[93m'
 GREY = '\033[90m'
@@ -38,38 +39,6 @@ def print_menu():
     title = f"{MAGENTA_BG}{BLACK_FG}{BOLD} COM-X.LIFE Downloader{ENDC}"
     author = f"{BOLD}Автор: https://github.com/smutchev{ENDC}"
     print(f"\n{title}  {author}\n")
-
-class Spinner:
-    def __init__(self, message=""):
-        self.spinner = itertools.cycle(['-', '\\', '|', '/'])
-        self.message = message
-        self.running = False
-        self.thread = None
-
-    def start(self):
-        self.running = True
-        self.thread = threading.Thread(target=self._spin)
-        self.thread.daemon = True
-        self.thread.start()
-
-    def _spin(self):
-        while self.running:
-            try:
-                sys.stdout.write(f"\r{self.message} {next(self.spinner)}")
-                sys.stdout.flush()
-                time.sleep(0.1)
-            except:
-                break
-        sys.stdout.write(f"\r{' ' * (len(self.message) + 20)}\r")
-        sys.stdout.flush()
-
-    def stop(self, final_message=""):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=0.1)
-        sys.stdout.write(f"\r{final_message}{' ' * (len(self.message) - len(final_message) + 2)}\n")
-        sys.stdout.flush()
-
 
 class ComXLifeDownloader:
     def __init__(self, browser_choice='chrome'):
@@ -267,11 +236,12 @@ class ComXLifeDownloader:
             return True
 
         chapter_folder.mkdir(parents=True, exist_ok=True)
-        spinner = None
         temp_archive_path = None
-        spinner_message = f"  🔗 Скачиваю: {chapter_title_safe}"
-        spinner = Spinner(spinner_message)
-        spinner.start()
+
+        # ========================================================================
+        # === ИЗМЕНЕНИЕ (v5.9): Убран Spinner ===
+        # ========================================================================
+        print(f"  🔗 Скачиваю: {chapter_title_safe}...", end="", flush=True)
 
         try:
             api_url = f"{self.base_url}/engine/ajax/controller.php?mod=api&action=chapters/download"
@@ -283,15 +253,20 @@ class ComXLifeDownloader:
                 "X-Requested-With": "XMLHttpRequest",
                 "Origin": self.base_url
             })
+
             link_resp = self.session.post(api_url, headers=api_headers, data=payload)
-            time_taken_s = f"({time.time() - start_time:.2f} сек)"
+
             if link_resp.status_code != 200:
-                spinner.stop(final_message=f"  ✗ Ошибка API: {link_resp.status_code} для [#{chapter_posi}] {time_taken_s}")
+                time_taken_s = f"({time.time() - start_time:.2f} сек)"
+                print(f"\r  ✗ Ошибка API: {link_resp.status_code} для [#{chapter_posi}] {time_taken_s}")
                 return False
+
             json_data = link_resp.json()
             raw_url = json_data.get("data")
+
             if not raw_url:
-                spinner.stop(final_message=f"  ✗ API не вернул ссылку для [#{chapter_posi}] (error: {json_data.get('error')}) {time_taken_s}")
+                time_taken_s = f"({time.time() - start_time:.2f} сек)"
+                print(f"\r  ✗ API не вернул ссылку для [#{chapter_posi}] (error: {json_data.get('error')}) {time_taken_s}")
                 return False
 
             download_url = "https:" + raw_url.replace("\\/", "/")
@@ -305,6 +280,7 @@ class ComXLifeDownloader:
                 with open(temp_archive_path, 'wb') as f:
                     for chunk in archive_response.iter_content(chunk_size=8192):
                         f.write(chunk)
+
                 extracted = False
                 try:
                     with zipfile.ZipFile(temp_archive_path, 'r') as zf:
@@ -317,11 +293,11 @@ class ComXLifeDownloader:
                         extracted = True
                     except Exception:
                         time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                        spinner.stop(final_message=f"  ✗ Ошибка распаковки: {chapter_title_safe} (не ZIP и не RAR) {time_taken_s}")
+                        print(f"\r  ✗ Ошибка распаковки: {chapter_title_safe} (не ZIP и не RAR) {time_taken_s}")
                         return False
                 except Exception:
                     time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                    spinner.stop(final_message=f"  ✗ Ошибка распаковки (ZIP): {chapter_title_safe} {time_taken_s}")
+                    print(f"\r  ✗ Ошибка распаковки (ZIP): {chapter_title_safe} {time_taken_s}")
                     return False
                 finally:
                     if temp_archive_path.exists():
@@ -329,17 +305,19 @@ class ComXLifeDownloader:
                             temp_archive_path.unlink()
                         except:
                             pass
+
                 time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                spinner.stop(final_message=f"  ✓ {chapter_title_safe} {time_taken_s}")
+                # Перезаписываем строку "Скачиваю..."
+                print(f"\r  ✓ {chapter_title_safe} {time_taken_s}{' ' * 20}")
                 return extracted
             else:
                 time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                spinner.stop(final_message=f"  ✗ Ошибка скачивания файла: {archive_response.status_code} {time_taken_s}")
+                print(f"\r  ✗ Ошибка скачивания файла: {archive_response.status_code} {time_taken_s}")
                 return False
+
         except Exception as e:
             time_taken_s = f"({time.time() - start_time:.2f} сек)"
-            if spinner:
-                spinner.stop(final_message=f"  ✗ Критическая ошибка: {chapter_title_safe} ({e}) {time_taken_s}")
+            print(f"\r  ✗ Критическая ошибка: {chapter_title_safe} ({e}) {time_taken_s}")
             if temp_archive_path and temp_archive_path.exists():
                 try:
                     temp_archive_path.unlink()
@@ -527,7 +505,7 @@ def main():
             questions = [
                 inquirer.Text('output',
                               message="📁 Папка для сохранения",
-                              default='manga'),
+                              default='Manga'),
                 inquirer.Text('range',
                               message="💡 Укажите диапазон (Enter = все)",
                               default=''),
