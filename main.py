@@ -1,537 +1,531 @@
-import os
-import sys
-import time
-import json
 import re
-import requests
-import zipfile
-import rarfile
-import threading
-import itertools
-import inquirer
+import sys
 from pathlib import Path
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.firefox.service import Service as FirefoxService
-from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from webdriver_manager.firefox import GeckoDriverManager
-from urllib.parse import urljoin, urlparse, quote
 
-# --- Цвета и Стили ---
-CYAN = '\033[96m'
-YELLOW = '\033[93m'
-GREY = '\033[90m'
-MAGENTA_BG = '\033[45m'
-BLACK_FG = '\033[30m'
-BOLD = '\033[1m'
-RED = '\033[91m'
-GREEN = '\033[92m'
-ENDC = '\033[0m'
-SEPARATOR = f"\n{GREY}────────────────────────────────────────────────────────────{ENDC}"
+from PyQt6.QtCore import Qt, QThreadPool, QPropertyAnimation, QTimer, QSettings
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QCheckBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QFileDialog,
+    QVBoxLayout,
+    QWidget,
+)
 
-def clear_console():
-    os.system('cls' if os.name == 'nt' else 'clear')
+from comx_client import ComXLifeClient
+from workers import AuthorizationWorker, SearchWorker, ChapterWorker, DownloadWorker
 
-def print_menu():
-    title = f"{MAGENTA_BG}{BLACK_FG}{BOLD} COM-X.LIFE Downloader{ENDC}"
-    author = f"{BOLD}Автор: https://github.com/smutchev{ENDC}"
-    print(f"\n{title}  {author}\n")
 
-class ComXLifeDownloader:
-    def __init__(self, browser_choice='chrome'):
-        self.base_url = "https://com-x.life"
-        self.session = requests.Session()
-        self.cookies = {}
-        self.browser_choice = browser_choice
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': self.base_url
-        }
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('COM-X.LIFE Downloader')
+        self.resize(980, 720)
+        self.client = ComXLifeClient()
+        self.threadpool = QThreadPool.globalInstance()
+        self.current_manga_url = None
+        self.current_manga_title = None
+        self.current_chapters = []
+        self.last_checked_index = None
+        self._suppress_checkbox_handlers = False
+        self.download_format = 'jpg'
+        self.downloaded_chapters = set()  # Track downloaded chapters by index
+        self.settings = QSettings('comx_downloader', 'comx_downloader')
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(3000)
+        self.refresh_timer.timeout.connect(lambda: self._update_indicators())
+        self._create_ui()
+        self._load_settings()
+        self._load_cookies()
 
-    def get_cookies_via_selenium(self):
-        print(SEPARATOR)
-        print("АВТОРИЗАЦИЯ")
-        driver = None
-        browser_name_display = self.browser_choice.capitalize()
-        try:
-            if self.browser_choice == 'chrome':
-                chrome_options = ChromeOptions()
-                chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-                chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-                chrome_options.add_experimental_option('useAutomationExtension', False)
-                service = ChromeService(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-            elif self.browser_choice == 'firefox':
-                ff_options = FirefoxOptions()
-                ff_options.set_preference("dom.webdriver.enabled", False)
-                ff_options.set_preference('useAutomationExtension', False)
-                ff_options.set_preference("general.useragent.override", self.headers['User-Agent'])
-                service = FirefoxService(GeckoDriverManager().install())
-                driver = webdriver.Firefox(service=service, options=ff_options)
-            else:
-                 print(f"✗ Неподдерживаемый браузер: {self.browser_choice}")
-                 return False
-        except Exception as e:
-            print(f"✗ Ошибка запуска {browser_name_display}: {e}")
-            print(f"\nПопробуйте установить {browser_name_display} или проверьте { 'ChromeDriver' if self.browser_choice == 'chrome' else 'GeckoDriver' }")
-            return False
-        if not driver:
-             print("✗ Не удалось инициализировать драйвер")
-             return False
-        try:
-            driver.get(self.base_url)
-            print(f"\n⚠ Сейчас {browser_name_display} открыт")
-            print("📝 Войдите в свой аккаунт на сайте com-x.life")
-            print("⏳ Скрипт *автоматически* продолжит работу после обнаружения входа...")
-            while True:
-                try:
-                    _ = driver.current_url
-                    if driver.get_cookie("dle_user_id"):
-                        print("\n✓ Обнаружен вход! Получаем cookies...")
-                        cookies_list = driver.get_cookies()
-                        for cookie in cookies_list:
-                            self.cookies[cookie['name']] = cookie['value']
-                            self.session.cookies.set(cookie['name'], cookie['value'])
-                        if self.cookies:
-                            self.save_cookies()
-                            print(f"✓ Получено {len(self.cookies)} cookies\n")
-                            return True
-                        else:
-                            print("✗ Не удалось извлечь cookies, хотя вход был обнаружен.")
-                            return False
-                    time.sleep(1)
-                except Exception:
-                    print(f"\n✗ Браузер был закрыт пользователем до завершения авторизации.")
-                    return False
-        except Exception as e:
-            print(f"✗ Ошибка во время ожидания авторизации: {e}")
-            return False
-        finally:
-            try:
-                driver.quit()
-            except:
-                pass
-        return False
+    def _create_ui(self):
+        root = QWidget()
+        self.setCentralWidget(root)
 
-    def save_cookies(self):
-        cookies_file = Path('comx_cookies.json')
-        with open(cookies_file, 'w', encoding='utf-8') as f:
-            json.dump(self.cookies, f)
-        print(f"✓ Cookies сохранены в {cookies_file}")
+        main_layout = QVBoxLayout(root)
+        control_layout = QGridLayout()
 
-    def load_cookies(self):
-        cookies_file = Path('comx_cookies.json')
-        if cookies_file.exists():
-            try:
-                with open(cookies_file, 'r', encoding='utf-8') as f:
-                    self.cookies = json.load(f)
-                    for name, value in self.cookies.items():
-                        self.session.cookies.set(name, value)
-                print(f"✓ Cookies загружены из файла")
-                return True
-            except:
-                pass
-        return False
+        self.browser_combo = QComboBox()
+        self.browser_combo.addItems(['Chrome', 'Firefox'])
+        self.auth_button = QPushButton('Авторизоваться')
+        self.auth_button.clicked.connect(self._start_authorization)
+        self.auth_status = QLabel('Не авторизован')
+        self.auth_status.setStyleSheet('color: #d14; font-weight: bold;')
 
-    def get_manga_id_from_url(self, url):
-        match = re.search(r'/(\d+)-', url)
-        if match:
-            return match.group(1)
-        return None
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText('Введите URL или название манги')
+        self.search_button = QPushButton('Найти')
+        self.search_button.clicked.connect(self._start_search)
 
-    def _perform_search_page(self, query, page=1):
-        try:
-            encoded_query = quote(query)
-            search_url = f"{self.base_url}/search/{encoded_query}/page/{page}/" if page > 1 else f"{self.base_url}/search/{encoded_query}"
-            response = self.session.get(search_url, headers=self.headers)
-            if response.status_code != 200: return []
-            soup = BeautifulSoup(response.content, 'lxml')
-            content = soup.find('div', id='dle-content')
-            if not content: return []
-            results = []
-            title_tags = content.find_all('h3', class_='readed__title')
-            if not title_tags: return []
-            for title_tag in title_tags:
-                if title_tag.a:
-                    title = title_tag.a.text.strip()
-                    url = title_tag.a['href']
-                    if not url.startswith('http'):
-                        url = urljoin(self.base_url, url)
-                    results.append({'title': title, 'url': url})
-            return results
-        except Exception:
-            return []
+        self.folder_edit = QLineEdit('Manga')
+        self.folder_edit.editingFinished.connect(self._save_folder_settings)
+        self.output_button = QPushButton('Обзор...')
+        self.output_button.clicked.connect(self._select_folder)
+        self.range_edit = QLineEdit()
+        self.range_edit.setPlaceholderText('Диапазон, например 1-10 или 5')
+        self.download_button = QPushButton('Скачать выбранное')
+        self.download_button.clicked.connect(self._start_download)
+        self.select_all_button = QPushButton('Выделить все')
+        self.select_all_button.setCheckable(True)
+        self.select_all_button.clicked.connect(self._toggle_select_all)
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(['jpg', 'cbr'])
+        self.format_combo.setCurrentText(self.download_format)
+        self.format_combo.currentTextChanged.connect(self._on_format_changed)
 
-    def fetch_search_results_sync(self, query):
-        all_results = []
-        current_page = 1
-        limit = 30
-        while len(all_results) < limit:
-            page_results = self._perform_search_page(query, page=current_page)
-            if not page_results:
-                break
-            all_results.extend(page_results)
-            current_page += 1
-        return all_results[:limit]
+        control_layout.addWidget(QLabel('Браузер:'), 0, 0)
+        control_layout.addWidget(self.browser_combo, 0, 1)
+        control_layout.addWidget(self.auth_button, 0, 2)
+        control_layout.addWidget(self.auth_status, 0, 3)
 
-    def get_chapters_list(self, manga_url):
-        print(SEPARATOR)
-        print("ПОЛУЧЕНИЕ СПИСКА ГЛАВ")
-        clean_url = manga_url.split('#')[0]
-        response = self.session.get(clean_url, headers=self.headers)
-        if response.status_code != 200:
-            print(f"✗ Ошибка при загрузке страницы: {response.status_code}")
-            if "Just a moment..." in response.text or response.status_code == 403:
-                 print("✗ Похоже на защиту Cloudflare или бан. Попробуйте удалить comx_cookies.json и авторизоваться заново.")
-            return None, None
-        soup = BeautifulSoup(response.content, 'lxml')
-        script_data = None
-        for script in soup.find_all('script'):
-            if script.string and 'window.__DATA__' in script.string:
-                script_data = script.string
-                break
-        if not script_data:
-            print("✗ Не удалось найти данные о главах (window.__DATA__)")
-            return None, None
-        try:
-            json_match = re.search(r'window\.__DATA__\s*=\s*({.+?});', script_data, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(1))
-                chapters = data.get('chapters', [])
-                chapters.sort(key=lambda x: x.get('posi', 0))
-                manga_title_raw = data.get("title", "Unknown Manga")
-                manga_title = self.sanitize_filename(manga_title_raw)
-                print(f"✓ Найдено глав: {len(chapters)}")
-                print(f"✓ Название манги: {manga_title}\n")
-                return chapters, manga_title
-        except Exception as e:
-            print(f"✗ Ошибка парсинга данных: {e}")
-        return None, None
+        control_layout.addWidget(QLabel('Поиск:'), 1, 0)
+        control_layout.addWidget(self.search_edit, 1, 1, 1, 3)
+        control_layout.addWidget(self.search_button, 1, 4)
 
-    def download_chapter(self, chapter, base_manga_folder, news_id, manga_url):
-        start_time = time.time()
-        chapter_id = chapter['id']
-        chapter_title_raw = chapter.get('title', f"Глава {chapter.get('number', '?')}")
-        chapter_posi = chapter.get('posi', 0)
+        control_layout.addWidget(QLabel('Папка:'), 2, 0)
+        control_layout.addWidget(self.folder_edit, 2, 1, 1, 3)
+        control_layout.addWidget(self.output_button, 2, 4)
 
-        match = re.match(r'^\s*([\d\.]+)\s*-\s*([\d\.]+)\s*(.*)', chapter_title_raw)
-        if match:
-            vol = match.group(1).strip()
-            ch = match.group(2).strip()
-            title = match.group(3).strip()
-            chapter_name = f"Vol. {vol} Ch. {ch} - {title}"
+        control_layout.addWidget(QLabel('Диапазон:'), 3, 0)
+        control_layout.addWidget(self.range_edit, 3, 1, 1, 2)
+        control_layout.addWidget(self.select_all_button, 3, 3)
+        control_layout.addWidget(self.download_button, 3, 4)
+        control_layout.addWidget(QLabel('Формат:'), 4, 0)
+        control_layout.addWidget(self.format_combo, 4, 1)
+
+        self.results_list = QListWidget()
+        self.results_list.setAlternatingRowColors(True)
+        self.results_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.results_list.itemSelectionChanged.connect(self._on_result_selected)
+
+        self.chapters_list = QListWidget()
+        self.chapters_list.setAlternatingRowColors(True)
+        # we'll use embedded checkbox widgets; disable native selection
+        self.chapters_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+
+        self.log_output = QPlainTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setMaximumBlockCount(500)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+
+        main_layout.addLayout(control_layout)
+        content_layout = QHBoxLayout()
+
+        search_layout = QVBoxLayout()
+        search_layout.addWidget(QLabel('Результаты поиска:'))
+        search_layout.addWidget(self.results_list)
+
+        chapters_layout = QVBoxLayout()
+        chapters_layout.addWidget(QLabel('Главы:'))
+        chapters_layout.addWidget(self.chapters_list)
+
+        content_layout.addLayout(search_layout, 1)
+        content_layout.addLayout(chapters_layout, 2)
+        main_layout.addLayout(content_layout)
+        main_layout.addWidget(QLabel('Журнал операций:'))
+        main_layout.addWidget(self.log_output)
+        main_layout.addWidget(self.progress_bar)
+
+        self.statusBar().showMessage('Готово')
+
+    def _load_cookies(self):
+        if self.client.load_cookies():
+            self.auth_status.setText('Авторизован')
+            self.auth_status.setStyleSheet('color: #2d862d; font-weight: bold;')
+            self._log('Cookies загружены из comx_cookies.json')
         else:
-            chapter_name = f"Ch. {chapter_posi:03d} - {chapter_title_raw}"
+            self._log('Cookies не найдены. Нажмите «Авторизоваться».')
 
-        chapter_title_safe = self.sanitize_filename(chapter_name)
-        chapter_folder = base_manga_folder / chapter_title_safe
+    def _load_settings(self):
+        output_folder = self.settings.value('output_folder', '')
+        if output_folder:
+            self.folder_edit.setText(output_folder)
+        self.download_format = self.settings.value('download_format', 'jpg')
+        self.format_combo.setCurrentText(self.download_format)
 
-        if chapter_folder.exists() and any(f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp'] for f in chapter_folder.iterdir()):
-            print(f"  ⊘ {chapter_title_safe} (пропущено)")
-            return True
+    def _save_settings(self):
+        self.settings.setValue('output_folder', self.folder_edit.text().strip())
+        self.settings.setValue('download_format', self.download_format)
 
-        chapter_folder.mkdir(parents=True, exist_ok=True)
-        temp_archive_path = None
+    def _save_folder_settings(self):
+        self._save_settings()
+        self._update_indicators()
 
-        # ========================================================================
-        # === ИЗМЕНЕНИЕ (v5.9): Убран Spinner ===
-        # ========================================================================
-        print(f"  🔗 Скачиваю: {chapter_title_safe}...", end="", flush=True)
+    def _select_folder(self):
+        directory = QFileDialog.getExistingDirectory(self, 'Выберите папку для сохранения', str(Path.cwd()))
+        if directory:
+            self.folder_edit.setText(directory)
+            self._save_settings()
+            self._update_indicators()
 
-        try:
-            api_url = f"{self.base_url}/engine/ajax/controller.php?mod=api&action=chapters/download"
-            payload = f"chapter_id={chapter_id}&news_id={news_id}"
-            api_headers = self.headers.copy()
-            api_headers.update({
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Referer": manga_url,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": self.base_url
-            })
+    def _start_authorization(self):
+        self.auth_button.setEnabled(False)
+        self.client.browser_choice = self.browser_combo.currentText().lower()
+        worker = AuthorizationWorker(self.client)
+        worker.signals.message.connect(self._log)
+        worker.signals.error.connect(self._show_error)
+        worker.signals.result.connect(self._on_auth_result)
+        worker.signals.finished.connect(lambda: self.auth_button.setEnabled(True))
+        self.threadpool.start(worker)
 
-            link_resp = self.session.post(api_url, headers=api_headers, data=payload)
+    def _on_auth_result(self, success):
+        if success:
+            self.auth_status.setText('Авторизован')
+            self.auth_status.setStyleSheet('color: #2d862d; font-weight: bold;')
+            self._show_message('Авторизация выполнена', 'Авторизация завершена успешно.')
+        else:
+            self.auth_status.setText('Не авторизован')
+            self.auth_status.setStyleSheet('color: #d14; font-weight: bold;')
+            self._show_message('Ошибка авторизации', 'Авторизация не завершена.')
 
-            if link_resp.status_code != 200:
-                time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                print(f"\r  ✗ Ошибка API: {link_resp.status_code} для [#{chapter_posi}] {time_taken_s}")
-                return False
+    def _start_search(self):
+        query = self.search_edit.text().strip()
+        if not query:
+            self._show_error('Введите URL или название манги для поиска.')
+            return
 
-            json_data = link_resp.json()
-            raw_url = json_data.get("data")
+        if 'com-x.life' in query.lower() and ('http://' in query.lower() or 'https://' in query.lower()):
+            self.results_list.clear()
+            self.chapters_list.clear()
+            self.current_chapters = []
+            list_item = QListWidgetItem(query)
+            list_item.setData(Qt.ItemDataRole.UserRole, query)
+            self.results_list.addItem(list_item)
+            self.results_list.setCurrentRow(0)
+            self._on_result_selected()
+            return
 
-            if not raw_url:
-                time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                print(f"\r  ✗ API не вернул ссылку для [#{chapter_posi}] (error: {json_data.get('error')}) {time_taken_s}")
-                return False
+        self.search_button.setEnabled(False)
+        self.download_button.setEnabled(False)
+        self.results_list.clear()
+        self.chapters_list.clear()
+        self.current_chapters = []
+        self.current_manga_url = None
+        worker = SearchWorker(self.client, query)
+        worker.signals.message.connect(self._log)
+        worker.signals.error.connect(self._show_error)
+        worker.signals.result.connect(self._populate_results)
+        worker.signals.finished.connect(lambda: self._set_controls_enabled(True))
+        self.threadpool.start(worker)
+        self._set_controls_enabled(False)
 
-            download_url = "https:" + raw_url.replace("\\/", "/")
-            parsed_url = urlparse(download_url)
-            ext = Path(parsed_url.path).suffix
-            if ext not in ['.zip', '.cbr']: ext = '.cbr'
-            temp_archive_path = chapter_folder / f"__archive__{ext}"
-            archive_response = self.session.get(download_url, headers=self.headers, stream=True, timeout=60)
+    def _populate_results(self, results):
+        self.results_list.clear()
+        self.chapters_list.clear()
+        self.current_chapters = []
+        self.current_manga_url = None
 
-            if archive_response.status_code == 200:
-                with open(temp_archive_path, 'wb') as f:
-                    for chunk in archive_response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+        if not results:
+            self._log('Ничего не найдено.')
+            self.statusBar().showMessage('Поиск завершён: ничего не найдено.')
+            return
 
-                extracted = False
-                try:
-                    with zipfile.ZipFile(temp_archive_path, 'r') as zf:
-                        zf.extractall(chapter_folder)
-                    extracted = True
-                except (zipfile.BadZipFile, zipfile.LargeZipFile):
-                    try:
-                        with rarfile.RarFile(temp_archive_path, 'r') as rf:
-                            rf.extractall(chapter_folder)
-                        extracted = True
-                    except Exception:
-                        time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                        print(f"\r  ✗ Ошибка распаковки: {chapter_title_safe} (не ZIP и не RAR) {time_taken_s}")
-                        return False
-                except Exception:
-                    time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                    print(f"\r  ✗ Ошибка распаковки (ZIP): {chapter_title_safe} {time_taken_s}")
-                    return False
-                finally:
-                    if temp_archive_path.exists():
-                        try:
-                            temp_archive_path.unlink()
-                        except:
-                            pass
+        for item in results:
+            list_item = QListWidgetItem(item['title'])
+            list_item.setData(Qt.ItemDataRole.UserRole, item['url'])
+            self.results_list.addItem(list_item)
 
-                time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                # Перезаписываем строку "Скачиваю..."
-                print(f"\r  ✓ {chapter_title_safe} {time_taken_s}{' ' * 20}")
-                return extracted
-            else:
-                time_taken_s = f"({time.time() - start_time:.2f} сек)"
-                print(f"\r  ✗ Ошибка скачивания файла: {archive_response.status_code} {time_taken_s}")
-                return False
+        self._log(f'Найдено {len(results)} результатов. Выберите мангу, чтобы загрузить список глав.')
+        self.statusBar().showMessage(f'Найдено {len(results)} результатов.')
+        if self.results_list.count() == 1:
+            self.results_list.setCurrentRow(0)
+            self._on_result_selected()
 
-        except Exception as e:
-            time_taken_s = f"({time.time() - start_time:.2f} сек)"
-            print(f"\r  ✗ Критическая ошибка: {chapter_title_safe} ({e}) {time_taken_s}")
-            if temp_archive_path and temp_archive_path.exists():
-                try:
-                    temp_archive_path.unlink()
-                except:
-                    pass
-            return False
+    def _on_result_selected(self):
+        current_item = self.results_list.currentItem()
+        if not current_item:
+            return
 
-    def download_manga(self, manga_url, output_dir="manga", start_chapter=None, end_chapter=None):
-        if not self.load_cookies():
-            if not self.get_cookies_via_selenium():
-                print(f"\n{RED}✗ ОШИБКА: Не удалось авторизоваться{ENDC}")
-                return False
+        manga_url = current_item.data(Qt.ItemDataRole.UserRole)
+        if manga_url == self.current_manga_url:
+            return
 
-        clear_console()
-        print_menu()
-        news_id = self.get_manga_id_from_url(manga_url)
-        if not news_id:
-            print(f"\n{RED}✗ Не удалось определить ID манги из URL{ENDC}")
-            return False
+        self.current_manga_url = manga_url
+        self.chapters_list.clear()
+        self.current_chapters = []
+        self._log(f'Загружаем главы: {current_item.text()}')
+        self.statusBar().showMessage('Загружаем список глав...')
 
-        print(f"\n📖 ID манги: {news_id}")
-        chapters, manga_title = self.get_chapters_list(manga_url)
+        worker = ChapterWorker(self.client, manga_url)
+        worker.signals.message.connect(self._log)
+        worker.signals.error.connect(self._show_error)
+        worker.signals.result.connect(self._populate_chapters)
+        worker.signals.finished.connect(lambda: self._set_controls_enabled(True))
+        self.threadpool.start(worker)
+        self._set_controls_enabled(False)
 
-        if not chapters or not manga_title:
-            print(f"\n{RED}✗ Не удалось получить список глав или название манги{ENDC}")
-            print("💡 Попробуйте:")
-            print("    1. Удалить файл comx_cookies.json и авторизоваться заново")
-            print("    2. Проверить правильность URL манги")
-            return False
+    def _populate_chapters(self, data):
+        self.chapters_list.clear()
+        self.current_chapters = data.get('chapters', [])
+        self.current_manga_title = data.get('title')
+        self.last_checked_index = None
+        self.downloaded_chapters.clear()  # Reset downloaded tracking for new manga
 
-        if start_chapter or end_chapter:
-            start = start_chapter or 1
-            end = end_chapter or 99999
-            chapters = [ch for ch in chapters if start <= ch.get('posi', 0) <= end]
-            print(f"📌 Выбран диапазон: главы {start}-{end} ({len(chapters)} шт.)\n")
+        if not self.current_chapters:
+            self._log('Список глав пуст, либо не удалось получить информацию.')
+            self.statusBar().showMessage('Список глав пуст.')
+            self.refresh_timer.stop()
+            return
 
-        base_manga_folder = Path(output_dir) / manga_title
-        base_manga_folder.mkdir(parents=True, exist_ok=True)
-
-        print(SEPARATOR)
-        print(f"{CYAN}{BOLD}СКАЧИВАНИЕ ГЛАВ{ENDC}")
-        print(SEPARATOR)
-
-        total_start_time = time.time()
-        success_count = 0
-
-        for idx, chapter in enumerate(chapters, 1):
+        # create item widgets with checkbox + label + colored indicator (red=not downloaded, green=downloaded)
+        for idx, chapter in enumerate(self.current_chapters):
+            pos = chapter.get('posi', 0)
+            title = chapter.get('title', '').strip()
+            item_text = f"{int(pos):03d} — {title}" if title else f"{int(pos):03d}"
+            list_item = QListWidgetItem()
+            container = QWidget()
+            h = QHBoxLayout(container)
+            h.setContentsMargins(6, 2, 6, 2)
+            checkbox = QCheckBox()
+            checkbox.setChecked(False)
+            checkbox.setStyleSheet('QCheckBox::indicator { width:18px; height:18px; }')
+            label = QLabel(item_text)
+            label.setObjectName('chapter_label')
+            h.addWidget(checkbox)
+            h.addWidget(label)
+            h.addStretch()
+            indicator = QLabel()
+            indicator.setObjectName('chapter_indicator')
+            indicator.setFixedSize(14, 14)
+            indicator.setStyleSheet('border-radius:7px; background: #ff6b6b;')
+            h.addWidget(indicator)
+            list_item.setSizeHint(container.sizeHint())
+            list_item.setData(Qt.ItemDataRole.UserRole, chapter)
+            self.chapters_list.addItem(list_item)
+            self.chapters_list.setItemWidget(list_item, container)
+            # try to detect already downloaded chapters and mark indicator green
             try:
-                if self.download_chapter(chapter, base_manga_folder, news_id, manga_url):
-                    success_count += 1
-                time.sleep(1)
-            except KeyboardInterrupt:
-                print(f"\n\n{YELLOW}⚠ Прервано пользователем{ENDC}")
-                break
+                base = Path(self.folder_edit.text().strip() or 'Manga') / self.current_manga_title
+                safe = ComXLifeClient.sanitize_filename(item_text)
+                exists = ComXLifeClient.chapter_exists(base, safe)
+                if exists:
+                    checkbox.setChecked(True)
+                    indicator.setStyleSheet('border-radius:7px; background: #77dd77;')
+                    self.downloaded_chapters.add(idx)
+                else:
+                    indicator.setStyleSheet('QLabel { background-color: #ff6b6b; border-radius: 7px; }')
+            except Exception:
+                indicator.setStyleSheet('QLabel { background-color: #ff6b6b; border-radius: 7px; }')
+            # connect checkbox handler with index
+            checkbox.stateChanged.connect(lambda state, ix=idx: self._on_checkbox_toggled(ix, state == Qt.CheckState.Checked))
+
+        self._log(f'Загружено {len(self.current_chapters)} глав.')
+        self.statusBar().showMessage(f'Найдено {len(self.current_chapters)} глав.')
+        # start periodic refresh of indicators
+        self.refresh_timer.start()
+
+    def _start_download(self):
+        current_item = self.results_list.currentItem()
+        if not current_item and self.results_list.count() == 1:
+            current_item = self.results_list.item(0)
+
+        if not current_item:
+            query = self.search_edit.text().strip()
+            if 'com-x.life' in query.lower() and ('http://' in query.lower() or 'https://' in query.lower()):
+                list_item = QListWidgetItem(query)
+                list_item.setData(Qt.ItemDataRole.UserRole, query)
+                self.results_list.addItem(list_item)
+                current_item = list_item
+            else:
+                self._show_error('Выберите результат поиска перед скачиванием.')
+                return
+
+        manga_url = current_item.data(Qt.ItemDataRole.UserRole)
+        output_dir = self.folder_edit.text().strip() or 'Manga'
+        start_chapter, end_chapter = ComXLifeClient.parse_range(self.range_edit.text())
+
+        # collect selected chapters from checkbox widgets
+        selected_chapters = []
+        for i in range(self.chapters_list.count()):
+            li = self.chapters_list.item(i)
+            widget = self.chapters_list.itemWidget(li)
+            if widget:
+                cb = widget.findChild(QCheckBox)
+                if cb and cb.isChecked():
+                    selected_chapters.append(li.data(Qt.ItemDataRole.UserRole))
+        if not selected_chapters:
+            selected_chapters = None
+
+        if not self.client.load_cookies():
+            self._show_error('Не найден comx_cookies.json. Сначала выполните авторизацию.')
+            return
+
+        self.progress_bar.setValue(0)
+        self.download_button.setEnabled(False)
+        self.search_button.setEnabled(False)
+        self.auth_button.setEnabled(False)
+
+        worker = DownloadWorker(self.client, manga_url, output_dir, start_chapter, end_chapter, selected_chapters=selected_chapters, download_format=self.download_format)
+        worker.signals.message.connect(self._on_worker_message)
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.error.connect(self._show_error)
+        worker.signals.result.connect(self._on_download_finished)
+        worker.signals.finished.connect(lambda: self._set_controls_enabled(True))
+        self.threadpool.start(worker)
+
+    def _on_progress(self, value):
+        self.progress_bar.setValue(value)
+
+    def _on_download_finished(self, summary):
+        self._log(f"Скачивание завершено: {summary['success']}/{summary['total']} глав.")
+        self._show_message('Готово', f"Сохранено в: {summary['path']}")
+        self.progress_bar.setValue(100)
+        self.statusBar().showMessage('Загрузка завершена.')
+
+    def _set_controls_enabled(self, enabled):
+        self.search_button.setEnabled(enabled)
+        self.download_button.setEnabled(enabled)
+        self.auth_button.setEnabled(enabled)
+        self.output_button.setEnabled(enabled)
+        self.results_list.setEnabled(enabled)
+        self.chapters_list.setEnabled(enabled)
+
+    def _toggle_select_all(self):
+        toggle_on = self.select_all_button.isChecked()
+        self._suppress_checkbox_handlers = True
+        for i in range(self.chapters_list.count()):
+            li = self.chapters_list.item(i)
+            widget = self.chapters_list.itemWidget(li)
+            if widget:
+                cb = widget.findChild(QCheckBox)
+                if cb:
+                    cb.setChecked(toggle_on)
+        self._suppress_checkbox_handlers = False
+        self.select_all_button.setText('Снять выделение' if toggle_on else 'Выделить все')
+
+    def _on_format_changed(self, text):
+        self.download_format = text
+        self._save_settings()
+        self._update_indicators()
+
+    def _update_indicators(self):
+        # Refresh indicators according to the chosen folder and actual chapter presence
+        for i in range(self.chapters_list.count()):
+            li = self.chapters_list.item(i)
+            widget = self.chapters_list.itemWidget(li)
+            if widget:
+                lbl = widget.findChild(QLabel, 'chapter_label')
+                ind = widget.findChild(QLabel, 'chapter_indicator')
+                if lbl and ind and self.current_manga_title:
+                    item_text = lbl.text()
+                    safe = ComXLifeClient.sanitize_filename(item_text)
+                    # Don't override green if already marked as downloaded
+                    if i in self.downloaded_chapters:
+                        ind.setStyleSheet('QLabel { background-color: #77dd77; border-radius: 7px; }')
+                        continue
+                    base = Path(self.folder_edit.text().strip() or 'Manga') / self.current_manga_title
+                    exists = ComXLifeClient.chapter_exists(base, safe)
+                    if exists:
+                        ind.setStyleSheet('QLabel { background-color: #77dd77; border-radius: 7px; }')
+                        self.downloaded_chapters.add(i)
+                    else:
+                        ind.setStyleSheet('QLabel { background-color: #ff6b6b; border-radius: 7px; }')
+
+    def _on_checkbox_toggled(self, index, checked):
+        if self._suppress_checkbox_handlers:
+            return
+
+        modifiers = QApplication.keyboardModifiers()
+        shift = modifiers & Qt.KeyboardModifier.ShiftModifier
+
+        if shift and self.last_checked_index is not None and self.last_checked_index != index:
+            # select range between last_checked_index and index
+            start = min(self.last_checked_index, index)
+            end = max(self.last_checked_index, index)
+            self._suppress_checkbox_handlers = True
+            for i in range(start, end + 1):
+                li = self.chapters_list.item(i)
+                widget = self.chapters_list.itemWidget(li)
+                if widget:
+                    cb = widget.findChild(QCheckBox)
+                    if cb:
+                        cb.setChecked(checked)
+            self._suppress_checkbox_handlers = False
+        # update last checked if user clicked (or programmatic single click)
+        self.last_checked_index = index
+
+
+    def _on_worker_message(self, text):
+        self._log(text)
+        if text.startswith('Скачано:'):
+            try:
+                downloaded = text.split(':', 1)[1].strip()
+                print(f"[DEBUG] Message after split: '{downloaded}'")
+                match = re.search(r'Ch\.\s*0*([0-9]+)\s*-\s*(.*)', downloaded)
+                downloaded_index = int(match.group(1)) if match else None
+                print(f"[DEBUG] Extracted index: {downloaded_index}")
+                for i in range(self.chapters_list.count()):
+                    li = self.chapters_list.item(i)
+                    widget = self.chapters_list.itemWidget(li)
+                    if not widget:
+                        continue
+                    chapter = li.data(Qt.ItemDataRole.UserRole)
+                    lbl = widget.findChild(QLabel, 'chapter_label')
+                    indicator = widget.findChild(QLabel, 'chapter_indicator')
+                    if chapter is None or lbl is None or indicator is None:
+                        continue
+                    chapter_pos = int(chapter.get('posi', 0))
+                    print(f"[DEBUG] Checking chapter {i}: pos={chapter_pos}, label='{lbl.text()}'")
+                    if downloaded_index is not None and chapter_pos == downloaded_index:
+                        matched = True
+                        print(f"[DEBUG] MATCHED by index! {chapter_pos} == {downloaded_index}")
+                    else:
+                        matched = downloaded in lbl.text() or downloaded in chapter.get('title', '')
+                        if matched:
+                            print(f"[DEBUG] MATCHED by text!")
+                    if matched:
+                        cb = widget.findChild(QCheckBox)
+                        if cb:
+                            cb.setChecked(True)
+                        indicator.setStyleSheet('QLabel { background-color: #77dd77; border-radius: 7px; }')
+                        self.downloaded_chapters.add(i)  # Mark as downloaded
+                        indicator.update()
+                        print(f"[DEBUG] Set indicator {i} to green and added to downloaded_chapters")
             except Exception as e:
-                print(f"  {RED}✗ Ошибка: {e}{ENDC}")
-                continue
+                print(f"[DEBUG] Error in _on_worker_message: {e}")
+                import traceback
+                traceback.print_exc()
 
-        total_time_taken = time.time() - total_start_time
+    def _log(self, text):
+        self.log_output.appendPlainText(text)
 
-        print(SEPARATOR)
-        print(f"{GREEN}{BOLD}ЗАВЕРШЕНО{ENDC}")
-        print(SEPARATOR)
-        print(f"✓ Успешно скачано: {success_count}/{len(chapters)} глав")
-        print(f"🕒 Общее время: {total_time_taken:.2f} сек")
-        print(f"📁 Сохранено в: {base_manga_folder.absolute()}\n")
-        return True
+    def _show_message(self, title, text):
+        QMessageBox.information(self, title, text)
 
-    @staticmethod
-    def sanitize_filename(filename):
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        filename = re.sub(r'[\s_]+', ' ', filename)
-        return filename.strip()
+    def _show_error(self, message):
+        self.log_output.appendPlainText(f'Ошибка: {message}')
+        QMessageBox.critical(self, 'Ошибка', message)
 
-    @staticmethod
-    def parse_range(range_str):
-        range_str = range_str.strip()
-        if not range_str:
-            return None, None
-        if '-' in range_str:
-            parts = range_str.split('-')
-            try:
-                start = int(parts[0]) if parts[0] else None
-            except ValueError:
-                start = None
-            try:
-                end = int(parts[1]) if parts[1] else None
-            except ValueError:
-                end = None
-            return start, end
-        else:
-            try:
-                num = int(range_str)
-                return num, num
-            except ValueError:
-                return None, None
 
 def main():
-    if sys.version_info < (3, 7):
-        print(f"{RED}✗ Ошибка: Этот скрипт требует Python 3.7+.{ENDC}")
-        sys.exit(1)
-
-    clear_console()
-    print_menu()
-
-    try:
-        questions = [
-            inquirer.List('browser',
-                          message="🔧 Выберите браузер для авторизации",
-                          choices=['Chrome', 'Firefox'],
-                          carousel=True),
-        ]
-        answers = inquirer.prompt(questions)
-        if not answers:
-            raise KeyboardInterrupt
-
-        browser_name = answers['browser'].lower()
-        downloader = ComXLifeDownloader(browser_choice=browser_name)
-
-        while True:
-            clear_console()
-            print_menu()
-
-            questions = [
-                inquirer.Text('query',
-                              message="📖 Введите URL или Название манги (Enter для выхода)"),
-            ]
-            answers = inquirer.prompt(questions)
-
-            if not answers or not answers['query']:
-                raise KeyboardInterrupt
-
-            input_str = answers['query'].strip()
-            manga_url = None
-
-            if 'com-x.life' in input_str and 'http' in input_str:
-                manga_url = input_str
-            else:
-                clear_console()
-                print_menu()
-                print(f"\n{YELLOW}🔍 Ищу '{input_str}'...{ENDC}")
-                results = downloader.fetch_search_results_sync(input_str)
-
-                clear_console()
-                print_menu()
-
-                if not results:
-                    print(f"{RED}✗ Ничего не найдено по запросу '{input_str}'.{ENDC}")
-                    time.sleep(2)
-                    continue
-
-                if len(results) == 1:
-                    manga_url = results[0]['url']
-                    print(f"✓ Найдена 1 манга: {results[0]['title']}")
-                else:
-                    print(f"\n{YELLOW}📚 Найдено {len(results)} результатов. Выберите:{ENDC}")
-                    for i, res in enumerate(results, 1):
-                        print(f"  {i:02d}: {res['title']}")
-
-                    print(f"\n{GREY}(Введите номер или нажмите Enter для нового поиска){ENDC}")
-                    choice_str = input(f"{CYAN}Выберите номер: {ENDC}").strip()
-
-                    if not choice_str:
-                        continue
-
-                    try:
-                        choice_idx = int(choice_str) - 1
-                        if 0 <= choice_idx < len(results):
-                            manga_url = results[choice_idx]['url']
-                            print(f"✓ Выбрано: {results[choice_idx]['title']}")
-                        else:
-                            print(f"{RED}✗ Неверный номер.{ENDC}")
-                            time.sleep(2)
-                            continue
-                    except ValueError:
-                        print(f"{RED}✗ Неверный ввод.{ENDC}")
-                        time.sleep(2)
-                        continue
-
-            if not manga_url:
-                 continue
-
-            questions = [
-                inquirer.Text('output',
-                              message="📁 Папка для сохранения",
-                              default='Manga'),
-                inquirer.Text('range',
-                              message="💡 Укажите диапазон (Enter = все)",
-                              default=''),
-            ]
-            answers = inquirer.prompt(questions)
-
-            if not answers:
-                continue
-
-            output_dir = answers['output'].strip() or 'manga'
-            start_chapter, end_chapter = ComXLifeDownloader.parse_range(answers['range'])
-
-            downloader.download_manga(manga_url, output_dir, start_chapter, end_chapter)
-
-            print(f"\n{CYAN}Нажмите Enter, чтобы начать новый поиск...{ENDC}")
-            input()
-
-    except KeyboardInterrupt:
-        print()
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n{RED}✗ Критическая ошибка: {e}{ENDC}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    app.setStyleSheet(
+        'QWidget { font-family: Arial, sans-serif; font-size: 12px; }'
+        'QPushButton { min-height: 28px; padding: 4px 10px; }'
+        'QLineEdit, QPlainTextEdit, QListWidget { border: 1px solid #c5c5c5; }'
+        'QPlainTextEdit { background: #121212; color: #e8e8e8; }'
+        'QProgressBar { min-height: 18px; }'
+    )
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

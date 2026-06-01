@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -8,6 +9,17 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+=======
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+>>>>>>> d447e75 (Initial commit: PyQt6 GUI for ComX manga downloader)
 build/
 develop-eggs/
 dist/
@@ -20,6 +32,7 @@ parts/
 sdist/
 var/
 wheels/
+<<<<<<< HEAD
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -216,3 +229,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project specific
+comx_cookies.json
+Manga/
+*.cbr
+*.cbz
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+>>>>>>> d447e75 (Initial commit: PyQt6 GUI for ComX manga downloader)

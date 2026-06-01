@@ -1,7 +1,8 @@
-requests
-beautifulsoup4
+﻿beautifulsoup4
+inquirer
 lxml
+PyQt6
+rarfile
+requests
 selenium
 webdriver-manager
-rarfile
-inquirer
